@@ -34,71 +34,96 @@ class DropboxFileSearcher:
 
     def search_member_files(self, member: dict, keywords: List[str], file_types: List[str] = None) -> List[dict]:
         """
-        Search files for a specific team member
+        Search files for a specific team member, including their shared folders
         """
         try:
             results = []
             dbx = self.dbx_team.as_user(member['team_member_id'])
             print(f"Starting search in {member['name']}'s account...")
             
-            # Start with root folder
-            folder_path = ''
+            # Get shared folder access
+            shared_folders = []
+            try:
+                shared_list = dbx.sharing_list_folders()
+                shared_folders.extend(shared_list.entries)
+                while shared_list.cursor:
+                    shared_list = dbx.sharing_list_folders_continue(shared_list.cursor)
+                    shared_folders.extend(shared_list.entries)
+            except Exception as e:
+                print(f"Error listing shared folders for {member['name']}: {e}")
+
             files_checked = 0
             
+            # Function to process entries
+            def process_entries(entries):
+                nonlocal files_checked, results
+                for entry in entries:
+                    files_checked += 1
+                    if files_checked % 100 == 0:
+                        print(f"Checked {files_checked} files in {member['name']}'s account...")
+                    
+                    if isinstance(entry, dropbox.files.FileMetadata):
+                        # Check file type
+                        if file_types:
+                            matches_extension = any(entry.path_lower.endswith(f".{ext.lower()}") for ext in file_types)
+                            if not matches_extension:
+                                continue
+                        
+                        # Check keywords
+                        if keywords:
+                            matches_keyword = any(keyword.lower() in entry.path_lower for keyword in keywords)
+                            if not matches_keyword:
+                                continue
+                        
+                        results.append({
+                            'name': entry.name,
+                            'path': entry.path_display,
+                            'size': entry.size,
+                            'last_modified': entry.client_modified,
+                            'owner': member['name'],
+                            'email': member['email'],
+                            'team_member_id': member['team_member_id']
+                        })
+                        print(f"Found matching file: {entry.name} in {member['name']}'s account")
+
+            # Search personal files
             try:
-                # Get all files recursively
-                has_more = True
                 cursor = None
-                
+                has_more = True
                 while has_more:
-                    try:
+                    if cursor:
+                        folder_list = dbx.files_list_folder_continue(cursor)
+                    else:
+                        folder_list = dbx.files_list_folder('', recursive=True)
+                    
+                    process_entries(folder_list.entries)
+                    cursor = folder_list.cursor
+                    has_more = folder_list.has_more
+            except Exception as e:
+                print(f"Error searching personal files for {member['name']}: {e}")
+
+            # Search shared folders
+            for shared_folder in shared_folders:
+                try:
+                    # Get the mounted folder path instead of using the ID directly
+                    folder_metadata = dbx.sharing_get_folder_metadata(shared_folder.shared_folder_id)
+                    path_display = folder_metadata.path_lower
+                    
+                    cursor = None
+                    has_more = True
+                    while has_more:
                         if cursor:
                             folder_list = dbx.files_list_folder_continue(cursor)
                         else:
-                            folder_list = dbx.files_list_folder(folder_path, recursive=True)
+                            folder_list = dbx.files_list_folder(path_display, recursive=True)
                         
-                        # Process each entry
-                        for entry in folder_list.entries:
-                            files_checked += 1
-                            if files_checked % 100 == 0:  # Progress update every 100 files
-                                print(f"Checked {files_checked} files in {member['name']}'s account...")
-                            
-                            if isinstance(entry, dropbox.files.FileMetadata):
-                                # Check if file matches any of the extensions
-                                if file_types:
-                                    matches_extension = any(entry.path_lower.endswith(f".{ext.lower()}") for ext in file_types)
-                                    if not matches_extension:
-                                        continue
-                                
-                                # Check if file matches any of the keywords
-                                if keywords:
-                                    matches_keyword = any(keyword.lower() in entry.path_lower for keyword in keywords)
-                                    if not matches_keyword:
-                                        continue
-                                
-                                results.append({
-                                    'name': entry.name,
-                                    'path': entry.path_display,
-                                    'size': entry.size,
-                                    'last_modified': entry.client_modified,
-                                    'owner': member['name'],
-                                    'email': member['email'],
-                                    'team_member_id': member['team_member_id']
-                                })
-                                print(f"Found matching file: {entry.name} in {member['name']}'s account")
-                        
-                        # Update cursor and check if there's more
+                        process_entries(folder_list.entries)
                         cursor = folder_list.cursor
                         has_more = folder_list.has_more
-                        
-                    except dropbox.exceptions.ApiError as e:
-                        print(f"API error in {member['name']}'s account: {e}")
-                        time.sleep(2)  # Wait before retrying
-                        continue
-                    
-            except Exception as e:
-                print(f"Error during file listing for {member['name']}: {e}")
-            
+                except Exception as e:
+                    print(f"Error searching shared folder for {member['name']}: {e}")
+                    continue
+
             print(f"Completed search in {member['name']}'s account. Checked {files_checked} files, found {len(results)} matches.")
             return results
             
